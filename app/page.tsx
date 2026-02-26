@@ -41,6 +41,12 @@ const BASE_SCHEDULE = {
   buka: { hour: 18, minute: 0 },
 };
 
+type AlarmItem = {
+  id: string;
+  time: string; // "HH:MM"
+  enabled: boolean;
+};
+
 type Mode = "sahur" | "buka";
 
 type AlarmState = {
@@ -89,6 +95,38 @@ function getNextTargetDate(timezone: string, mode: Mode) {
   return target;
 }
 
+function getNextTargetDateFromHM(timezone: string, hour: number, minute: number) {
+  const now = getNowInTimezone(timezone);
+  const target = new Date(now);
+  target.setHours(hour, minute, 0, 0);
+  if (target <= now) {
+    target.setDate(target.getDate() + 1);
+  }
+  return target;
+}
+
+function parseHMFromTimeInput(value: string): { hour: number; minute: number } {
+  // Expecting format "HH:MM"
+  const [h, m] = value.split(":").map((v) => parseInt(v, 10));
+  const hour = isNaN(h) ? 0 : Math.max(0, Math.min(23, h));
+  const minute = isNaN(m) ? 0 : Math.max(0, Math.min(59, m));
+  return { hour, minute };
+}
+
+function getNextFromMultiple(timezone: string, alarms: AlarmItem[]): { target: Date | null; idx: number | null } {
+  const now = getNowInTimezone(timezone);
+  let best: { t: Date; idx: number } | null = null;
+  alarms.forEach((a, idx) => {
+    if (!a.enabled) return;
+    const { hour, minute } = parseHMFromTimeInput(a.time);
+    const t = getNextTargetDateFromHM(timezone, hour, minute);
+    if (!best || t.getTime() - now.getTime() < best.t.getTime() - now.getTime()) {
+      best = { t, idx };
+    }
+  });
+  return best ? { target: best.t, idx: best.idx } : { target: null, idx: null };
+}
+
 function formatTime(date: Date) {
   return date.toLocaleTimeString("id-ID", {
     hour: "2-digit",
@@ -114,6 +152,11 @@ export default function Home() {
   const [now, setNow] = useState<Date | null>(null);
   const [target, setTarget] = useState<Date | null>(null);
   const [isRinging, setIsRinging] = useState(false);
+  const [alarms, setAlarms] = useState<AlarmItem[]>([
+    { id: crypto.randomUUID(), time: "04:30", enabled: true },
+    { id: crypto.randomUUID(), time: "18:00", enabled: false },
+  ]);
+  const [newAlarmTime, setNewAlarmTime] = useState("06:00");
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -131,10 +174,18 @@ export default function Home() {
     return () => clearInterval(id);
   }, [city.timezone]);
 
-  // Hitung target setiap pergantian kota atau mode
+  // Hitung target setiap perubahan kota, mode, atau daftar alarms
   useEffect(() => {
-    setTarget(getNextTargetDate(city.timezone, mode));
-  }, [city.timezone, mode]);
+    // Jika tidak ada alarm enabled, gunakan jadwal mode default agar countdown tetap informatif
+    const enabledCount = alarms.filter((a) => a.enabled).length;
+    if (enabledCount === 0) {
+      const base = BASE_SCHEDULE[mode];
+      setTarget(getNextTargetDateFromHM(city.timezone, base.hour, base.minute));
+      return;
+    }
+    const { target: t } = getNextFromMultiple(city.timezone, alarms);
+    setTarget(t);
+  }, [city.timezone, mode, alarms]);
 
   // Jalankan alarm ketika waktu tercapai
   useEffect(() => {
@@ -143,6 +194,15 @@ export default function Home() {
     const diff = target.getTime() - now.getTime();
     if (diff <= 0 && !isRinging) {
       setIsRinging(true);
+      // Jadwalkan ulang target ke alarm terdekat berikutnya (hari berikutnya untuk jam yang sama)
+      const { idx } = getNextFromMultiple(city.timezone, alarms);
+      if (idx !== null) {
+        const a = alarms[idx];
+        const { hour, minute } = parseHMFromTimeInput(a.time);
+        const next = getNextTargetDateFromHM(city.timezone, hour, minute);
+        next.setDate(next.getDate() + 1);
+        setTarget(next);
+      }
       if (audioRef.current) {
         audioRef.current.currentTime = 0;
         audioRef.current.play().catch(() => {
@@ -150,7 +210,7 @@ export default function Home() {
         });
       }
     }
-  }, [alarm.enabled, now, target, isRinging]);
+  }, [alarm.enabled, now, target, isRinging, alarms, city.timezone]);
 
   const countdown = useMemo(() => {
     if (!now || !target) return "--:--:--";
@@ -162,40 +222,14 @@ export default function Home() {
     return formatTime(now);
   }, [now]);
 
-  const handleToggleAlarm = () => {
-    if (isRinging) {
-      // Matikan alarm ketika sedang berbunyi
-      setIsRinging(false);
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.currentTime = 0;
-      }
-      return;
-    }
+  
+  const headline = "Alarm Harian";
+  const subHeadline = "Tambahkan beberapa jam alarm harian. Countdown mengarah ke alarm terdekat.";
 
-    setAlarm((prev) => ({ enabled: !prev.enabled, mode }));
-  };
+  const targetLabel = "Alarm berikutnya";
 
-  const headline = mode === "sahur" ? "Alarm Sahur" : "Alarm Buka Puasa";
-  const subHeadline =
-    mode === "sahur"
-      ? "Bangun tepat waktu untuk sahur dengan alarm yang lantang dan jelas."
-      : "Jangan kelewatan waktu berbuka, alarm siap mengingatkan dengan suara besar.";
-
-  const targetLabel = mode === "sahur" ? "Imsak/Sahur berikutnya" : "Maghrib/Buka berikutnya";
-
-  const alarmButtonLabel = isRinging
-    ? "Matikan Alarm"
-    : alarm.enabled
-    ? "Alarm Aktif"
-    : "Aktifkan Alarm";
-
-  const alarmButtonStyle = isRinging
-    ? "bg-red-600 shadow-[0_0_50px_rgba(248,113,113,0.9)] scale-105"
-    : alarm.enabled
-    ? "bg-emerald-500 shadow-[0_0_40px_rgba(16,185,129,0.8)]"
-    : "bg-zinc-800 dark:bg-zinc-100";
-
+  
+  
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-50 flex items-center justify-center px-4 py-8">
       <audio
@@ -236,10 +270,10 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Konten Utama */}
-        <section className="mt-8 grid gap-6 lg:grid-cols-[1.4fr,1fr] items-stretch">
+        {/* Konten Utama - Mobile first satu kolom, melebar di layar besar */}
+        <section className="mt-6 grid gap-5 md:gap-6 lg:grid-cols-[1.2fr,1fr] items-stretch">
           {/* Kartu Jam Utama */}
-          <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-6 sm:p-8 shadow-xl">
+          <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-5 sm:p-6 shadow-xl">
             <div className="pointer-events-none absolute -left-24 -top-24 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl" />
             <div className="pointer-events-none absolute -right-16 bottom-4 h-40 w-40 rounded-full bg-cyan-400/10 blur-3xl" />
 
@@ -248,7 +282,7 @@ export default function Home() {
                 <p className="text-xs font-medium uppercase tracking-[0.3em] text-emerald-300/80">
                   Waktu Sekarang
                 </p>
-                <p className="mt-2 text-[2.8rem] sm:text-[3.4rem] md:text-[3.8rem] leading-none font-semibold tracking-[0.12em] text-white tabular-nums">
+                <p className="mt-2 text-[2.6rem] sm:text-[3.2rem] md:text-[3.6rem] leading-none font-semibold tracking-[0.12em] text-white tabular-nums">
                   {currentTimeStr}
                 </p>
                 <p className="mt-2 text-xs text-slate-400">{city.name}</p>
@@ -266,7 +300,7 @@ export default function Home() {
             </div>
 
             {/* Countdown */}
-            <div className="relative mt-8 rounded-2xl border border-white/10 bg-black/40 px-4 py-4 sm:px-6 sm:py-5">
+            <div className="relative mt-6 rounded-2xl border border-white/10 bg-black/40 px-4 py-4 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">
@@ -294,36 +328,74 @@ export default function Home() {
           </div>
 
           {/* Panel Kontrol Alarm */}
-          <aside className="flex flex-col justify-between gap-6 rounded-3xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/95 p-5 sm:p-6 shadow-xl">
-            <div className="space-y-4">
+          <aside className="flex flex-col gap-5 rounded-3xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/95 p-4 sm:p-5 shadow-xl">
+            <div className="space-y-3">
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Kontrol Alarm
               </p>
 
-              {/* Switch Mode */}
-              <div className="flex items-center justify-between rounded-2xl bg-white/5 p-2">
+              {/* Form tambah alarm */}
+              <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/40 p-3">
+                <input
+                  type="time"
+                  step={60}
+                  className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm text-slate-50 outline-none focus:border-emerald-400/80"
+                  value={newAlarmTime}
+                  onChange={(e) => setNewAlarmTime(e.target.value)}
+                />
                 <button
                   type="button"
-                  onClick={() => setMode("sahur")}
-                  className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold tracking-wide transition-all ${
-                    mode === "sahur"
-                      ? "bg-emerald-500 text-slate-950 shadow-[0_0_20px_rgba(16,185,129,0.7)]"
-                      : "text-slate-300 hover:bg-white/5"
-                  }`}
+                  onClick={() => {
+                    if (!newAlarmTime) return;
+                    const exists = alarms.some((a) => a.time === newAlarmTime);
+                    const id = crypto.randomUUID();
+                    setAlarms((prev) =>
+                      exists
+                        ? prev.map((a) => (a.time === newAlarmTime ? { ...a, enabled: true } : a))
+                        : [...prev, { id, time: newAlarmTime, enabled: true }]
+                    );
+                  }}
+                  className="rounded-xl bg-emerald-500 px-4 py-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-950 shadow-[0_0_20px_rgba(16,185,129,0.6)]"
                 >
-                  Sahur
+                  Tambah
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setMode("buka")}
-                  className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold tracking-wide transition-all ${
-                    mode === "buka"
-                      ? "bg-amber-400 text-slate-950 shadow-[0_0_20px_rgba(251,191,36,0.7)]"
-                      : "text-slate-300 hover:bg-white/5"
-                  }`}
-                >
-                  Buka Puasa
-                </button>
+              </div>
+
+              {/* Daftar alarm */}
+              <div className="space-y-2">
+                {alarms.length === 0 && (
+                  <p className="text-[11px] text-slate-500">Belum ada alarm. Tambahkan jam di atas.</p>
+                )}
+                {alarms
+                  .slice()
+                  .sort((a, b) => a.time.localeCompare(b.time))
+                  .map((a) => (
+                    <div
+                      key={a.id}
+                      className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-3 py-3"
+                    >
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          className="h-5 w-5 accent-emerald-500"
+                          checked={a.enabled}
+                          onChange={(e) =>
+                            setAlarms((prev) => prev.map((x) => (x.id === a.id ? { ...x, enabled: e.target.checked } : x)))
+                          }
+                        />
+                        <span className={`text-base font-semibold tabular-nums ${a.enabled ? "text-white" : "text-slate-400"}`}>
+                          {a.time}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAlarms((prev) => prev.filter((x) => x.id !== a.id))}
+                        className="rounded-lg px-3 py-2 text-[11px] text-slate-300 hover:bg-white/10"
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  ))}
               </div>
 
               {/* Info Alarm */}
@@ -349,51 +421,59 @@ export default function Home() {
                     </span>
                   </div>
                   <span className="text-[10px] text-slate-500 uppercase tracking-[0.2em]">
-                    {mode === "sahur" ? "Sahur" : "Buka"}
+                    Zona: {city.timezone}
                   </span>
                 </div>
               </div>
 
               {/* Peringatan Browser */}
               <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
-                Untuk memastikan alarm berbunyi, biarkan halaman ini terbuka dan pastikan volume
-                perangkat tidak dimute. Beberapa browser hanya mengizinkan audio setelah ada
-                interaksi dari pengguna.
+                Biarkan halaman ini terbuka dan pastikan volume tidak mute. Beberapa browser
+                hanya mengizinkan audio setelah ada interaksi pengguna.
               </p>
             </div>
 
-            {/* Tombol Alarm Besar */}
-            <button
-              type="button"
-              onClick={handleToggleAlarm}
-              className={`relative mt-2 flex items-center justify-center overflow-hidden rounded-2xl border border-white/10 px-4 py-5 text-center text-sm font-semibold uppercase tracking-[0.35em] text-white transition-all duration-200 ease-out ${
-                alarmButtonStyle
-              }`}
-            >
-              <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_10%_0%,rgba(255,255,255,0.16)_0,transparent_55%),radial-gradient(circle_at_100%_100%,rgba(52,211,153,0.4)_0,transparent_55%)] opacity-70" />
-
-              <span className="relative flex flex-col items-center gap-1">
-                <span className="text-[0.65rem] tracking-[0.38em] text-white/80">
-                  Super Bass Alarm
-                </span>
-                <span className="text-lg sm:text-xl font-bold tracking-[0.45em]">
-                  {alarmButtonLabel}
-                </span>
-                <span className="mt-1 text-[10px] uppercase tracking-[0.3em] text-white/70">
-                  {isRinging ? "Tekan untuk mematikan" : "Tekan untuk mengaktifkan"}
-                </span>
-              </span>
-            </button>
+            {/* Tombol Aksi Besar - mobile friendly */}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setAlarm((p) => ({ ...p, enabled: !p.enabled }))}
+                className={`rounded-2xl border border-white/10 px-3 py-4 text-center text-[11px] font-semibold uppercase tracking-[0.32em] text-white ${
+                  alarm.enabled
+                    ? "bg-emerald-500 shadow-[0_0_30px_rgba(16,185,129,0.7)] text-slate-950"
+                    : "bg-zinc-800 dark:bg-zinc-100 text-white"
+                }`}
+              >
+                {alarm.enabled ? "Matikan Semua" : "Aktifkan Semua"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isRinging) {
+                    setIsRinging(false);
+                    if (audioRef.current) {
+                      audioRef.current.pause();
+                      audioRef.current.currentTime = 0;
+                    }
+                  } else {
+                    // Nonaktifkan semua alarm terpilih (toggle)
+                    setAlarms((prev) => prev.map((a) => ({ ...a, enabled: false })));
+                  }
+                }}
+                className="rounded-2xl border border-white/10 px-3 py-4 text-center text-[11px] font-semibold uppercase tracking-[0.32em] text-white bg-red-600/90 hover:bg-red-600"
+              >
+                {isRinging ? "Matikan Bunyi" : "Nonaktifkan Daftar"}
+              </button>
+            </div>
           </aside>
         </section>
 
         {/* Footer Info */}
-        <footer className="mt-8 flex flex-col gap-2 border-t border-white/10 pt-4 text-[11px] text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+        <footer className="mt-6 flex flex-col gap-2 border-t border-white/10 pt-4 text-[11px] text-slate-500 sm:flex-row sm:items-center sm:justify-between">
           <p>
-            Jadwal jam sahur & buka di sini bersifat perkiraan umum (sahur 04:30, buka 18:00 waktu setempat).
-            Untuk ibadah yang lebih tepat, selalu rujuk ke jadwal resmi masjid/instansi berwenang.
+            Anda dapat menambahkan beberapa jam alarm. Countdown mengarah ke alarm terdekat sesuai zona waktu.
           </p>
-          <p className="text-[10px] text-slate-600">Mode gelap otomatis berbasis tema sistem.</p>
+          <p className="text-[10px] text-slate-600">Desain mobile-first, tema gelap mengikuti sistem.</p>
         </footer>
       </main>
     </div>
